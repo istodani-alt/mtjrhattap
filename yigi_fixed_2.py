@@ -43,7 +43,7 @@ def keep_alive():
 # ==========================================
 
 # ====== سىزنىڭ تەڭشەكلىرىڭىز تولدۇرۇلدى ======
-BOT_TOKEN = "8902137402:AAFjYbHAwEP02QyYCoEUavB0FOg2SSPfcQY"
+BOT_TOKEN = "9037019918:AAHPi7VCKinoxyVlxILPPLXeO8fJ4BlaTe0"
 ADMIN_IDS = [7875653665]
 API_ID = 37171071
 API_HASH = "b36f73444855dc87595d2757279b9409"
