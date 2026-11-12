@@ -1,6 +1,6 @@
 import os
 import asyncio
-import aiosqlite
+import asyncpg
 import re
 import shutil
 import logging
@@ -21,33 +21,16 @@ from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.storage.memory import MemoryStorage
 from telethon import TelegramClient
 from telethon.errors import SessionPasswordNeededError
-from flask import Flask
-from threading import Thread
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
-
-# ====== Flask (Render ئۈچۈن ئۇخلاپ قالماسلىق سىستېمىسى) ======
-app = Flask('')
-
-@app.route('/')
-def home():
-    return "Bot is alive and running!"
-
-def run():
-    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
-
-def keep_alive():
-    t = Thread(target=run)
-    t.start()
-# ==========================================
 
 # ====== سىزنىڭ تەڭشەكلىرىڭىز تولدۇرۇلدى ======
 BOT_TOKEN = "9037019918:AAHPi7VCKinoxyVlxILPPLXeO8fJ4BlaTe0"
 ADMIN_IDS = [7875653665]
 API_ID = 37171071
 API_HASH = "b36f73444855dc87595d2757279b9409"
-DB_NAME = "data.db"
+DATABASE_URL = "postgresql://postgres:hattap571611@db.sqnhyxwszicqibznnmsj.supabase.co:5432/postgres"
 SESSIONS_DIR = "sessions"
 TEMP_DIR = "temp"
 NOTIFICATION_CHANNEL = "-1005247605135"
@@ -118,39 +101,61 @@ async def safe_edit_or_send(message: Message, text=None, reply_markup=None, pars
             await message.answer(text=text, reply_markup=reply_markup, parse_mode=parse_mode)
 
 async def init_db():
-    async with aiosqlite.connect(DB_NAME) as db:
-        await db.execute('''CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, username TEXT, balance REAL DEFAULT 0.0, is_banned INTEGER DEFAULT 0)''')
-        await db.execute('''CREATE TABLE IF NOT EXISTS accounts (id INTEGER PRIMARY KEY AUTOINCREMENT, phone TEXT UNIQUE, session_file TEXT, price REAL DEFAULT 2.0, country TEXT DEFAULT 'General', status TEXT DEFAULT 'available', session_2fa_pass TEXT DEFAULT NULL)''')
-        await db.execute('''CREATE TABLE IF NOT EXISTS categories (country TEXT PRIMARY KEY)''')
-        await db.execute('''CREATE TABLE IF NOT EXISTS orders (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, phone TEXT, price REAL, date TEXT)''')
-        await db.execute('''CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)''')
-        await db.execute('''CREATE TABLE IF NOT EXISTS user_transfers (id INTEGER PRIMARY KEY AUTOINCREMENT, sender_id INTEGER, receiver_id INTEGER, amount REAL, fee REAL, net_amount REAL, link TEXT UNIQUE, status TEXT DEFAULT 'pending')''')
-        await db.execute('''CREATE TABLE IF NOT EXISTS manual_deposits (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, txid TEXT UNIQUE, amount REAL, status TEXT DEFAULT 'pending', date TEXT)''')
-        await db.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('stars_rate', ?)", (str(STARS_RATE),))
-        await db.commit()
+    conn = await asyncpg.connect(DATABASE_URL)
+    try:
+        await conn.execute('''CREATE TABLE IF NOT EXISTS users (user_id BIGINT PRIMARY KEY, username TEXT, balance REAL DEFAULT 0.0, is_banned INTEGER DEFAULT 0)''')
+        await conn.execute('''CREATE TABLE IF NOT EXISTS accounts (id SERIAL PRIMARY KEY, phone TEXT UNIQUE, session_file TEXT, price REAL DEFAULT 2.0, country TEXT DEFAULT 'General', status TEXT DEFAULT 'available', session_2fa_pass TEXT DEFAULT NULL)''')
+        await conn.execute('''CREATE TABLE IF NOT EXISTS categories (country TEXT PRIMARY KEY)''')
+        await conn.execute('''CREATE TABLE IF NOT EXISTS orders (id SERIAL PRIMARY KEY, user_id BIGINT, phone TEXT, price REAL, date TEXT)''')
+        await conn.execute('''CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)''')
+        await conn.execute('''CREATE TABLE IF NOT EXISTS user_transfers (id SERIAL PRIMARY KEY, sender_id BIGINT, receiver_id BIGINT, amount REAL, fee REAL, net_amount REAL, link TEXT UNIQUE, status TEXT DEFAULT 'pending')''')
+        await conn.execute('''CREATE TABLE IF NOT EXISTS manual_deposits (id SERIAL PRIMARY KEY, user_id BIGINT, txid TEXT UNIQUE, amount REAL, status TEXT DEFAULT 'pending', date TEXT)''')
+        await conn.execute("INSERT INTO settings (key, value) VALUES ('stars_rate', $1) ON CONFLICT (key) DO NOTHING", str(STARS_RATE))
+    finally:
+        await conn.close()
 
 async def db_execute(query, params=()):
-    async with aiosqlite.connect(DB_NAME) as db:
-        cursor = await db.execute(query, params)
-        await db.commit()
-        return cursor.lastrowid
+    idx = 1
+    while '?' in query:
+        query = query.replace('?', f'${idx}', 1)
+        idx += 1
+    conn = await asyncpg.connect(DATABASE_URL)
+    try:
+        res = await conn.execute(query, *params)
+        return res
+    finally:
+        await conn.close()
 
 async def db_fetchone(query, params=()):
-    async with aiosqlite.connect(DB_NAME) as db:
-        cursor = await db.execute(query, params)
-        return await cursor.fetchone()
+    idx = 1
+    while '?' in query:
+        query = query.replace('?', f'${idx}', 1)
+        idx += 1
+    conn = await asyncpg.connect(DATABASE_URL)
+    try:
+        row = await conn.fetchrow(query, *params)
+        return row
+    finally:
+        await conn.close()
 
 async def db_fetchall(query, params=()):
-    async with aiosqlite.connect(DB_NAME) as db:
-        cursor = await db.execute(query, params)
-        return await cursor.fetchall()
+    idx = 1
+    while '?' in query:
+        query = query.replace('?', f'${idx}', 1)
+        idx += 1
+    conn = await asyncpg.connect(DATABASE_URL)
+    try:
+        rows = await conn.fetch(query, *params)
+        return rows
+    finally:
+        await conn.close()
 
 async def get_setting(key, default=None):
-    res = await db_fetchone("SELECT value FROM settings WHERE key=?", (key,))
+    res = await db_fetchone("SELECT value FROM settings WHERE key=$1", (key,))
     return res[0] if res else default
 
 async def set_setting(key, value):
-    await db_execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, str(value)))
+    await db_execute("INSERT INTO settings (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", (key, str(value)))
 
 def mask_phone(phone: str) -> str:
     if not phone or len(phone) < 6:
@@ -187,12 +192,12 @@ async def cmd_start(msg: Message, state: FSMContext):
     await state.clear()
     uid = msg.from_user.id
     uname = msg.from_user.username or "User"
-    await db_execute("INSERT OR IGNORE INTO users (user_id, username) VALUES (?, ?)", (uid, uname))
+    await db_execute("INSERT INTO users (user_id, username) VALUES ($1, $2) ON CONFLICT (user_id) DO NOTHING", (uid, uname))
 
     args = msg.text.split()
     if len(args) > 1 and args[1].startswith("pay_"):
         link_code = args[1]
-        transfer = await db_fetchone("SELECT sender_id, amount, status FROM user_transfers WHERE link=?", (link_code,))
+        transfer = await db_fetchone("SELECT sender_id, amount, status FROM user_transfers WHERE link=$1", (link_code,))
         if not transfer:
             return await msg.reply("❌ رابط الدفع غير صالح أو منتهي الصلاحية.")
         sender_id, amount, status = transfer
@@ -200,8 +205,8 @@ async def cmd_start(msg: Message, state: FSMContext):
             return await msg.reply("❌ تم استخدام هذا الرابط مسبقاً.")
         if sender_id == uid:
             return await msg.reply("❌ لا يمكنك استلام الرابط الخاص بك!")
-        await db_execute("UPDATE user_transfers SET status='completed', receiver_id=? WHERE link=?", (uid, link_code))
-        await db_execute("UPDATE users SET balance = balance + ? WHERE user_id=?", (amount, uid))
+        await db_execute("UPDATE user_transfers SET status='completed', receiver_id=$1 WHERE link=$2", (uid, link_code))
+        await db_execute("UPDATE users SET balance = balance + $1 WHERE user_id=$2", (amount, uid))
         await msg.reply(f"✅ تم استلام المبلغ بنجاح! تمت إضافة <b>{amount:.2f}$</b> لرصيدك.", parse_mode=ParseMode.HTML)
         try:
             await bot.send_message(sender_id, f"💰 تم استلام رابط التحويل الخاص بك بمبلغ <b>{amount:.2f}$</b> من المستخدم <code>{uid}</code>.", parse_mode=ParseMode.HTML)
@@ -209,7 +214,7 @@ async def cmd_start(msg: Message, state: FSMContext):
             pass
         return
 
-    row = await db_fetchone("SELECT balance FROM users WHERE user_id=?", (uid,))
+    row = await db_fetchone("SELECT balance FROM users WHERE user_id=$1", (uid,))
     balance = row[0] if row else 0.0
     text = (f"👋 مرحباً بك في البوت 🚀\n\n"
             f"🆔 أيدي حسابك:   <code>{uid}</code>\n"
@@ -221,7 +226,7 @@ async def cmd_start(msg: Message, state: FSMContext):
 async def main_menu(c: CallbackQuery, state: FSMContext):
     await state.clear()
     uid = c.from_user.id
-    row = await db_fetchone("SELECT balance FROM users WHERE user_id=?", (uid,))
+    row = await db_fetchone("SELECT balance FROM users WHERE user_id=$1", (uid,))
     balance = row[0] if row else 0.0
     text = (f"👋 مرحباً بك في البوت 🚀\n\n"
             f"🆔 أيدي حسابك:    <code>{uid}</code>\n"
@@ -270,7 +275,7 @@ async def manual_deposit_txid(msg: Message, state: FSMContext):
             parse_mode=ParseMode.HTML
         )
     
-    existing = await db_fetchone("SELECT id FROM manual_deposits WHERE txid=?", (txid,))
+    existing = await db_fetchone("SELECT id FROM manual_deposits WHERE txid=$1", (txid,))
     if existing:
         return await msg.reply("❌ رقم العملية هذا تم استخدامه مسبقاً! يرجى التحقق.")
 
@@ -294,7 +299,7 @@ async def manual_deposit_amount(msg: Message, state: FSMContext):
     date_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
     await db_execute(
-        "INSERT INTO manual_deposits (user_id, txid, amount, status, date) VALUES (?, ?, ?, 'pending', ?)",
+        "INSERT INTO manual_deposits (user_id, txid, amount, status, date) VALUES ($1, $2, $3, 'pending', $4)",
         (uid, txid, amount, date_str)
     )
     await state.clear()
@@ -337,27 +342,29 @@ async def admin_deposit_decision(c: CallbackQuery):
     uid = int(parts[1])
     txid = parts[-1]
 
-    dep = await db_fetchone("SELECT status FROM manual_deposits WHERE txid=?", (txid,))
+    dep = await db_fetchone("SELECT status FROM manual_deposits WHERE txid=$1", (txid,))
     if not dep or dep[0] != 'pending':
         return await c.answer("تم معالجة هذا الطلب مسبقاً أو غير موجود.", show_alert=True)
 
     if action == "dep_acc":
         amount = float(parts[2])
-        await db_execute("UPDATE manual_deposits SET status='completed' WHERE txid=?", (txid,))
-        await db_execute("UPDATE users SET balance = balance + ? WHERE user_id=?", (amount, uid))
+        await db_execute("UPDATE manual_deposits SET status='completed' WHERE txid=$1", (txid,))
+        await db_execute("UPDATE users SET balance = balance + $1 WHERE user_id=$2", (amount, uid))
         await c.message.edit_text(c.message.html_text + "\n\n<b>✅ تم قبول الطلب وشحن الرصيد بنجاح.</b>", parse_mode=ParseMode.HTML)
         try:
             await bot.send_message(uid, f"🎉 <b>تم قبول طلب الشحن الخاص بك!</b>\n\n💰 تمت إضافة <b>{amount}$</b> لرصيدك.", parse_mode=ParseMode.HTML)
         except Exception:
             pass
     else:
-        await db_execute("UPDATE manual_deposits SET status='rejected' WHERE txid=?", (txid,))
+        await db_execute("UPDATE manual_deposits SET status='rejected' WHERE txid=$1", (txid,))
         await c.message.edit_text(c.message.html_text + "\n\n<b>❌ تم رفض الطلب.</b>", parse_mode=ParseMode.HTML)
         try:
             await bot.send_message(uid, f"❌ <b>عذراً، تم رفض طلب الشحن الخاص بك</b> برقم العملية <code>{txid}</code>.", parse_mode=ParseMode.HTML)
         except Exception:
             pass
     await c.answer()
+
+# ==========================================
 
 @router.callback_query(F.data == "stars_charge_select")
 async def stars_charge_options(c: CallbackQuery):
@@ -407,8 +414,8 @@ async def payment_success(msg: Message):
     parts = p.invoice_payload.split("_")
     if parts[0] == "stars":
         uid, usd_val = int(parts[1]), float(parts[2])
-        await db_execute("INSERT OR IGNORE INTO users (user_id, username) VALUES (?, ?)", (uid, msg.from_user.username or "User"))
-        await db_execute("UPDATE users SET balance = balance + ? WHERE user_id=?", (usd_val, uid))
+        await db_execute("INSERT INTO users (user_id, username) VALUES ($1, $2) ON CONFLICT (user_id) DO NOTHING", (uid, msg.from_user.username or "User"))
+        await db_execute("UPDATE users SET balance = balance + $1 WHERE user_id=$2", (usd_val, uid))
         await msg.answer(f"✅ تم شحن رصيدك بنجاح!\nالمبلغ: {usd_val}$")
 
 @router.callback_query(F.data == "transfer_menu")
@@ -431,7 +438,7 @@ async def transfer_set_target(msg: Message, state: FSMContext):
         target = int(msg.text.strip())
         if target == msg.from_user.id:
             return await msg.reply("❌ لا يمكنك التحويل لنفسك!")
-        target_user = await db_fetchone("SELECT user_id FROM users WHERE user_id=?", (target,))
+        target_user = await db_fetchone("SELECT user_id FROM users WHERE user_id=$1", (target,))
         if not target_user:
             return await msg.reply("❌ هذا المستخدم غير مسجل في البوت.")
         await state.update_data(target=target)
@@ -451,12 +458,12 @@ async def transfer_process(msg: Message, state: FSMContext):
         receiver = data['target']
         fee = amount * TRANSFER_FEE_PERCENT
         net_amount = amount - fee
-        bal = await db_fetchone("SELECT balance FROM users WHERE user_id=?", (sender,))
+        bal = await db_fetchone("SELECT balance FROM users WHERE user_id=$1", (sender,))
         if not bal or bal[0] < amount:
             await state.clear()
             return await msg.reply(f"❌ رصيدك غير كافٍ. المطلوب: {amount}$", reply_markup=main_kb(sender))
-        await db_execute("UPDATE users SET balance = balance - ? WHERE user_id=?", (amount, sender))
-        await db_execute("UPDATE users SET balance = balance + ? WHERE user_id=?", (net_amount, receiver))
+        await db_execute("UPDATE users SET balance = balance - $1 WHERE user_id=$2", (amount, sender))
+        await db_execute("UPDATE users SET balance = balance + $1 WHERE user_id=$2", (net_amount, receiver))
         await msg.reply(f"✅ تم التحويل بنجاح!\n💸 المبلغ المستلم: {net_amount:.2f}$\n📉 العمولة: {fee:.2f}$", reply_markup=main_kb(sender))
         try:
             await bot.send_message(receiver, f"🎉 وصلك تحويل من المستخدم <code>{sender}</code> بقيمة <b>{net_amount:.2f}$</b>", parse_mode=ParseMode.HTML)
@@ -480,18 +487,18 @@ async def create_link_process(msg: Message, state: FSMContext):
         if amount <= 0:
             return await msg.reply("❌ المبلغ يجب أن يكون أكبر من صفر.")
         sender = msg.from_user.id
-        bal = await db_fetchone("SELECT balance FROM users WHERE user_id=?", (sender,))
+        bal = await db_fetchone("SELECT balance FROM users WHERE user_id=$1", (sender,))
         if not bal or bal[0] < amount:
             await state.clear()
             return await msg.reply(f"❌ رصيدك غير كافٍ لإنشاء هذا الرابط. المطلوب: {amount}$", reply_markup=main_kb(sender))
-        await db_execute("UPDATE users SET balance = balance - ? WHERE user_id=?", (amount, sender))
+        await db_execute("UPDATE users SET balance = balance - $1 WHERE user_id=$2", (amount, sender))
         unique_id = str(uuid.uuid4())[:8]
         timestamp = int(datetime.now().timestamp())
         hash_part = hashlib.md5(f"{sender}_{timestamp}_{unique_id}".encode()).hexdigest()[:6]
         link_code = f"pay_{hash_part}_{unique_id}_{timestamp}"
         bot_username = (await bot.get_me()).username
         link_url = f"https://t.me/{bot_username}?start={link_code}"
-        await db_execute("INSERT INTO user_transfers (sender_id, amount, link, status) VALUES (?,?,?, 'pending')", (sender, amount, link_code))
+        await db_execute("INSERT INTO user_transfers (sender_id, amount, link, status) VALUES ($1,$2,$3, 'pending')", (sender, amount, link_code))
         copy_btn = InlineKeyboardButton(text=" نسخ الرابط", copy_text=CopyTextButton(text=link_url), style='primary')
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [copy_btn],
@@ -620,7 +627,7 @@ async def set_country(msg: Message, state: FSMContext):
         return
     country_name = msg.text.strip()
     await state.update_data(country=country_name)
-    await db_execute("INSERT OR IGNORE INTO categories (country) VALUES (?)", (country_name,))
+    await db_execute("INSERT INTO categories (country) VALUES ($1) ON CONFLICT (country) DO NOTHING", (country_name,))
     await state.set_state(AdminUploadStates.waiting_for_price)
     await msg.reply("💰 أدخل سعر البيع الموحد لهذه الجلسات:")
 
@@ -692,7 +699,7 @@ async def finalize_bulk_upload(message: Message, state: FSMContext):
                     await client.disconnect()
                     shutil.copy2(sess_path, dst)
                     await db_execute(
-                        "INSERT OR REPLACE INTO accounts (phone, session_file, price, country, status, session_2fa_pass) VALUES (?,?,?,?,?,?)",
+                        "INSERT INTO accounts (phone, session_file, price, country, status, session_2fa_pass) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (phone) DO UPDATE SET session_file = EXCLUDED.session_file, price = EXCLUDED.price, country = EXCLUDED.country, status = EXCLUDED.status, session_2fa_pass = EXCLUDED.session_2fa_pass",
                         (phone, final_name, price, country, 'available', fa)
                     )
                     success += 1
@@ -759,7 +766,7 @@ async def admin_show_user(msg: Message, state: FSMContext):
         return
     try:
         uid = int(msg.text.strip())
-        user = await db_fetchone("SELECT user_id, username, balance FROM users WHERE user_id=?", (uid,))
+        user = await db_fetchone("SELECT user_id, username, balance FROM users WHERE user_id=$1", (uid,))
         if not user:
             return await msg.reply("❌ المستخدم غير موجود.")
         u_id, u_name, u_bal = user
@@ -782,7 +789,7 @@ async def admin_balance_action(c: CallbackQuery, state: FSMContext):
     action, uid_str = c.data.split(":")
     uid = int(uid_str)
     if action == "bal_zero":
-        await db_execute("UPDATE users SET balance = 0 WHERE user_id=?", (uid,))
+        await db_execute("UPDATE users SET balance = 0 WHERE user_id=$1", (uid,))
         await c.answer("✅ تم تصفير الرصيد", show_alert=True)
         return
     await state.update_data(bal_uid=uid, bal_type=action.replace("bal_", ""))
@@ -800,10 +807,10 @@ async def admin_balance_process(msg: Message, state: FSMContext):
         data = await state.get_data()
         uid, atype = data['bal_uid'], data['bal_type']
         if atype == "add":
-            await db_execute("UPDATE users SET balance = balance + ? WHERE user_id=?", (amount, uid))
+            await db_execute("UPDATE users SET balance = balance + $1 WHERE user_id=$2", (amount, uid))
             await msg.reply(f"✅ تمت إضافة {amount}$ للمستخدم {uid}", reply_markup=back_kb("admin_panel"))
         elif atype == "sub":
-            await db_execute("UPDATE users SET balance = balance - ? WHERE user_id=?", (amount, uid))
+            await db_execute("UPDATE users SET balance = balance - $1 WHERE user_id=$2", (amount, uid))
             await msg.reply(f"✅ تم خصم {amount}$ من المستخدم {uid}", reply_markup=back_kb("admin_panel"))
         await state.clear()
     except ValueError:
@@ -853,8 +860,8 @@ async def process_rename(msg: Message, state: FSMContext):
     data = await state.get_data()
     old = data['old_country']
     new = msg.text.strip()
-    await db_execute("UPDATE accounts SET country=? WHERE country=?", (new, old))
-    await db_execute("UPDATE categories SET country=? WHERE country=?", (new, old))
+    await db_execute("UPDATE accounts SET country=$1 WHERE country=$2", (new, old))
+    await db_execute("UPDATE categories SET country=$1 WHERE country=$2", (new, old))
     await msg.reply(f"✅ تم تغيير اسم القسم إلى '{new}'", reply_markup=back_kb("admin_countries_manage"))
     await state.clear()
 
@@ -877,7 +884,7 @@ async def process_price(msg: Message, state: FSMContext):
         if price <= 0:
             raise ValueError
         data = await state.get_data()
-        await db_execute("UPDATE accounts SET price=? WHERE country=?", (price, data['target_country']))
+        await db_execute("UPDATE accounts SET price=$1 WHERE country=$2", (price, data['target_country']))
         await msg.reply(f"✅ تم تحديث السعر إلى {price}$", reply_markup=back_kb("admin_countries_manage"))
         await state.clear()
     except ValueError:
@@ -900,7 +907,7 @@ async def process_set_2fa(msg: Message, state: FSMContext):
     input_val = msg.text.strip()
     new_2fa = None if input_val.lower() == 'none' else input_val
     data = await state.get_data()
-    await db_execute("UPDATE accounts SET session_2fa_pass=? WHERE country=?", (new_2fa, data['target_country']))
+    await db_execute("UPDATE accounts SET session_2fa_pass=$1 WHERE country=$2", (new_2fa, data['target_country']))
     display_val = new_2fa if new_2fa else "لا يوجد (None)"
     await msg.reply(f"✅ تم تحديث كلمة المرور في قسم '{data['target_country']}'\n🔑 الكلمة الجديدة: {display_val}", reply_markup=back_kb("admin_countries_manage"))
     await state.clear()
@@ -910,16 +917,16 @@ async def delete_country(c: CallbackQuery):
     if c.from_user.id not in ADMIN_IDS:
         return
     country = c.data.split(":", 1)[1]
-    accs = await db_fetchall("SELECT session_file FROM accounts WHERE country=?", (country,))
-    for (s,) in accs:
-        p = os.path.join(SESSIONS_DIR, s)
+    accs = await db_fetchall("SELECT session_file FROM accounts WHERE country=$1", (country,))
+    for s in accs:
+        p = os.path.join(SESSIONS_DIR, s['session_file'])
         if os.path.exists(p):
             try:
                 os.remove(p)
             except Exception:
                 pass
-    await db_execute("DELETE FROM accounts WHERE country=?", (country,))
-    await db_execute("DELETE FROM categories WHERE country=?", (country,))
+    await db_execute("DELETE FROM accounts WHERE country=$1", (country,))
+    await db_execute("DELETE FROM categories WHERE country=$1", (country,))
     await c.answer(f"✅ تم حذف قسم {country} وجميع حساباته", show_alert=True)
     await admin_countries_list(c)
 
@@ -931,7 +938,7 @@ async def show_countries_page(message: Message, page=0):
     rows_per_page = 14
     cats_rows = await db_fetchall("SELECT country FROM categories ORDER BY country")
     accs_rows = await db_fetchall("SELECT DISTINCT country FROM accounts WHERE status='available' ORDER BY country")
-    all_countries_names = sorted(list(set([r[0] for r in cats_rows] + [r[0] for r in accs_rows])))
+    all_countries_names = sorted(list(set([r['country'] for r in cats_rows] + [r['country'] for r in accs_rows])))
     if not all_countries_names:
         kb = [
             [InlineKeyboardButton(text="لا توجد أقسام حالياً", callback_data="noop")],
@@ -947,11 +954,11 @@ async def show_countries_page(message: Message, page=0):
     i = 0
     while i < len(page_countries):
         c1_name = page_countries[i]
-        c1_row = await db_fetchone("SELECT COUNT(*) FROM accounts WHERE country=? AND status='available'", (c1_name,))
+        c1_row = await db_fetchone("SELECT COUNT(*) FROM accounts WHERE country=$1 AND status='available'", (c1_name,))
         c1_count = c1_row[0] if c1_row else 0
         if i + 1 < len(page_countries):
             c2_name = page_countries[i + 1]
-            c2_row = await db_fetchone("SELECT COUNT(*) FROM accounts WHERE country=? AND status='available'", (c2_name,))
+            c2_row = await db_fetchone("SELECT COUNT(*) FROM accounts WHERE country=$1 AND status='available'", (c2_name,))
             c2_count = c2_row[0] if c2_row else 0
             if len(c1_name) > 15 or len(c2_name) > 15:
                 kb.append([InlineKeyboardButton(text=f"{c1_name} | {c1_count}", callback_data=f"view_accs:{c1_name}", style='primary')])
@@ -989,14 +996,15 @@ async def search_country_start(c: CallbackQuery, state: FSMContext):
 @router.message(BuySessionStates.select_country)
 async def process_search(msg: Message, state: FSMContext):
     query = msg.text.strip()
-    matches = await db_fetchall("SELECT DISTINCT country FROM accounts WHERE country LIKE ?", (f"%{query}%",))
+    matches = await db_fetchall("SELECT DISTINCT country FROM accounts WHERE country LIKE $1", (f"%{query}%",))
     await state.clear()
     if not matches:
         await msg.reply("❌ لم يتم العثور على نتائج مطابقة.", reply_markup=back_kb("buy_menu"))
         return
     kb = []
-    for (country_name,) in matches:
-        count_row = await db_fetchone("SELECT COUNT(*) FROM accounts WHERE country=? AND status='available'", (country_name,))
+    for row in matches:
+        country_name = row['country']
+        count_row = await db_fetchone("SELECT COUNT(*) FROM accounts WHERE country=$1 AND status='available'", (country_name,))
         count = count_row[0] if count_row else 0
         kb.append([InlineKeyboardButton(text=f"{country_name} | {count}", callback_data=f"view_accs:{country_name}", style='primary')])
     kb.append([InlineKeyboardButton(text="🔙 عودة للقائمة", callback_data="buy_menu", style='primary')])
@@ -1005,11 +1013,11 @@ async def process_search(msg: Message, state: FSMContext):
 @router.callback_query(F.data.startswith("view_accs:"))
 async def view_accounts(c: CallbackQuery):
     country = c.data.split(":", 1)[1]
-    accs = await db_fetchall("SELECT id, phone, price FROM accounts WHERE country=? AND status='available' LIMIT 10", (country,))
+    accs = await db_fetchall("SELECT id, phone, price FROM accounts WHERE country=$1 AND status='available' LIMIT 10", (country,))
     kb = []
     for acc in accs:
-        masked = mask_phone(acc[1])
-        kb.append([InlineKeyboardButton(text=f"{masked} | {acc[2]}$", callback_data=f"buy_acc:{acc[0]}", style='success')])
+        masked = mask_phone(acc['phone'])
+        kb.append([InlineKeyboardButton(text=f"{masked} | {acc['price']}$", callback_data=f"buy_acc:{acc['id']}", style='success')])
     if not kb:
         kb.append([InlineKeyboardButton(text="لا توجد حسابات متاحة حالياً (القسم فارغ)", callback_data="noop")])
     kb.append([InlineKeyboardButton(text="🔙 عودة", callback_data="buy_menu", style='primary')])
@@ -1018,16 +1026,16 @@ async def view_accounts(c: CallbackQuery):
 @router.callback_query(F.data.startswith("buy_acc:"))
 async def buy_account(c: CallbackQuery):
     aid = int(c.data.split(":", 1)[1])
-    acc = await db_fetchone("SELECT phone, price, country, session_2fa_pass FROM accounts WHERE id=? AND status='available'", (aid,))
+    acc = await db_fetchone("SELECT phone, price, country, session_2fa_pass FROM accounts WHERE id=$1 AND status='available'", (aid,))
     if not acc:
         return await c.answer("تم بيعه أو لم يعد متاحاً", show_alert=True)
-    phone, price, country, fa = acc
+    phone, price, country, fa = acc['phone'], acc['price'], acc['country'], acc['session_2fa_pass']
     uid = c.from_user.id
-    bal = await db_fetchone("SELECT balance FROM users WHERE user_id=?", (uid,))
+    bal = await db_fetchone("SELECT balance FROM users WHERE user_id=$1", (uid,))
     if not bal or bal[0] < price:
         return await c.answer("رصيدك غير كافٍ", show_alert=True)
-    await db_execute("UPDATE users SET balance = balance - ? WHERE user_id=?", (price, uid))
-    await db_execute("UPDATE accounts SET status='processing' WHERE id=?", (aid,))
+    await db_execute("UPDATE users SET balance = balance - $1 WHERE user_id=$2", (price, uid))
+    await db_execute("UPDATE accounts SET status='processing' WHERE id=$1", (aid,))
     formatted_phone = f"+{phone}" if not phone.startswith("+") else phone
     copy_phone_kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=" نسخ الرقم", copy_text=CopyTextButton(text=formatted_phone), style='success')],
@@ -1046,10 +1054,10 @@ async def buy_account(c: CallbackQuery):
     )
 
 async def get_real_code(msg: Message, phone, aid, country, uid, fa):
-    sess_row = await db_fetchone("SELECT session_file, status FROM accounts WHERE id=?", (aid,))
+    sess_row = await db_fetchone("SELECT session_file, status FROM accounts WHERE id=$1", (aid,))
     if not sess_row:
         return
-    sess_file, current_status = sess_row
+    sess_file, current_status = sess_row['session_file'], sess_row['status']
     path = os.path.join(SESSIONS_DIR, sess_file)
     client = TelegramClient(path, API_ID, API_HASH)
     found = False
@@ -1103,11 +1111,18 @@ async def get_real_code(msg: Message, phone, aid, country, uid, fa):
                                    f"⏳ سيتم الخروج تلقائياً بعد 10 دقائق")
                             await safe_edit_or_send(msg, text=txt, parse_mode=ParseMode.HTML, reply_markup=copy_code_kb)
                             if current_status != 'sold':
-                                acc_price = (await db_fetchone("SELECT price FROM accounts WHERE id=?", (aid,)))[0]
-                                order_id = await db_execute(
-                                    "INSERT INTO orders (user_id, phone, price, date) VALUES (?,?,?,?)",
-                                    (uid, phone, acc_price, datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
-                                )
+                                acc_price_row = await db_fetchone("SELECT price FROM accounts WHERE id=$1", (aid,))
+                                acc_price = acc_price_row['price']
+                                conn = await asyncpg.connect(DATABASE_URL)
+                                try:
+                                    order_row = await conn.fetchrow(
+                                        "INSERT INTO orders (user_id, phone, price, date) VALUES ($1, $2, $3, $4) RETURNING id",
+                                        uid, phone, acc_price, datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                                    )
+                                    order_id = order_row['id']
+                                finally:
+                                    await conn.close()
+
                                 notif_text = (
                                     f"✅ تم شراء حساب جديد من البوت\n\n"
                                     f"🌍 الدولة : {country}\n"
@@ -1126,7 +1141,7 @@ async def get_real_code(msg: Message, phone, aid, country, uid, fa):
                                     await bot.send_message(NOTIFICATION_CHANNEL, notif_text, reply_markup=channel_kb)
                                 except Exception:
                                     pass
-                                await db_execute("UPDATE accounts SET status='sold' WHERE id=?", (aid,))
+                                await db_execute("UPDATE accounts SET status='sold' WHERE id=$1", (aid,))
                                 if aid in pending_logouts:
                                     pending_logouts[aid].cancel()
                                 task = asyncio.create_task(auto_logout(aid, uid, formatted_phone, sess_file))
@@ -1158,10 +1173,10 @@ async def get_real_code(msg: Message, phone, aid, country, uid, fa):
 @router.callback_query(F.data.startswith("req:"))
 async def req_code(c: CallbackQuery):
     aid = int(c.data.split(":", 1)[1])
-    acc = await db_fetchone("SELECT phone, country, session_2fa_pass FROM accounts WHERE id=?", (aid,))
+    acc = await db_fetchone("SELECT phone, country, session_2fa_pass FROM accounts WHERE id=$1", (aid,))
     if not acc:
         return await c.answer("الحساب غير موجود", show_alert=True)
-    phone, country, fa = acc
+    phone, country, fa = acc['phone'], acc['country'], acc['session_2fa_pass']
     await safe_edit_or_send(c.message, text=f"⏳ جاري جلب رمز التحقق لـ +{phone.lstrip('+')}...\nقم بطلب الكود في تطبيق تيليجرام الآن.")
     asyncio.create_task(get_real_code(c.message, phone, aid, country, c.from_user.id, fa))
 
@@ -1171,17 +1186,17 @@ async def logout_session(c: CallbackQuery):
     if aid in pending_logouts:
         pending_logouts[aid].cancel()
         del pending_logouts[aid]
-    acc = await db_fetchone("SELECT phone, session_file FROM accounts WHERE id=?", (aid,))
+    acc = await db_fetchone("SELECT phone, session_file FROM accounts WHERE id=$1", (aid,))
     if not acc:
         return await c.answer("الحساب غير موجود", show_alert=True)
-    path = os.path.join(SESSIONS_DIR, acc[1])
+    path = os.path.join(SESSIONS_DIR, acc['session_file'])
     client = TelegramClient(path, API_ID, API_HASH)
     try:
         await client.connect()
         await client.log_out()
-        await safe_edit_or_send(c.message, text=f"📞 +{acc[0].lstrip('+')}\n\n✅ تم تسجيل الخروج بنجاح وحماية الحساب", reply_markup=back_kb("main_menu"))
+        await safe_edit_or_send(c.message, text=f"📞 +{acc['phone'].lstrip('+')}\n\n✅ تم تسجيل الخروج بنجاح وحماية الحساب", reply_markup=back_kb("main_menu"))
     except Exception:
-        await safe_edit_or_send(c.message, text=f"📞 +{acc[0].lstrip('+')}\n\n❌ حدث خطأ أثناء تسجيل الخروج أو تم الخروج مسبقاً", reply_markup=back_kb("main_menu"))
+        await safe_edit_or_send(c.message, text=f"📞 +{acc['phone'].lstrip('+')}\n\n❌ حدث خطأ أثناء تسجيل الخروج أو تم الخروج مسبقاً", reply_markup=back_kb("main_menu"))
     finally:
         try:
             await client.disconnect()
@@ -1222,10 +1237,10 @@ async def auto_logout(aid, uid, phone, sess):
 
 async def refund(aid, uid):
     try:
-        p_row = await db_fetchone("SELECT price, status FROM accounts WHERE id=?", (aid,))
-        if p_row and p_row[1] == 'processing':
-            await db_execute("UPDATE users SET balance = balance + ? WHERE user_id=?", (p_row[0], uid))
-            await db_execute("UPDATE accounts SET status='corrupted' WHERE id=?", (aid,))
+        p_row = await db_fetchone("SELECT price, status FROM accounts WHERE id=$1", (aid,))
+        if p_row and p_row['status'] == 'processing':
+            await db_execute("UPDATE users SET balance = balance + $1 WHERE user_id=$2", (p_row['price'], uid))
+            await db_execute("UPDATE accounts SET status='corrupted' WHERE id=$1", (aid,))
     except Exception:
         pass
 
@@ -1256,9 +1271,9 @@ async def sms_soon(c: CallbackQuery):
 async def buy_sessions_zip_start(c: CallbackQuery, state: FSMContext):
     cats_rows = await db_fetchall("SELECT country FROM categories ORDER BY country")
     accs_rows = await db_fetchall("SELECT country, COUNT(*) FROM accounts WHERE status='available' GROUP BY country")
-    all_cats_dict = {r[0]: 0 for r in cats_rows}
+    all_cats_dict = {r['country']: 0 for r in cats_rows}
     for r in accs_rows:
-        all_cats_dict[r[0]] = r[1]
+        all_cats_dict[r['country']] = r['count'] if 'count' in r else r[1]
     rows = sorted(all_cats_dict.items())
     kb = []
     if rows:
@@ -1272,7 +1287,7 @@ async def buy_sessions_zip_start(c: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data.startswith("sess_cat:"))
 async def sess_cat_select(c: CallbackQuery, state: FSMContext):
     country = c.data.split(":", 1)[1]
-    count_row = await db_fetchone("SELECT COUNT(*) FROM accounts WHERE country=? AND status='available'", (country,))
+    count_row = await db_fetchone("SELECT COUNT(*) FROM accounts WHERE country=$1 AND status='available'", (country,))
     avail = count_row[0] if count_row else 0
     if avail < 2:
         await c.answer("❌ عذراً، يجب توفر جلستين على الأقل للشراء", show_alert=True)
@@ -1303,22 +1318,27 @@ async def process_session_count(msg: Message, state: FSMContext):
         return await msg.reply("❌ الحد الأدنى للطلب هو 2 جلسات.")
     if count > max_avail:
         return await msg.reply(f"❌ العدد المطلوب ({count}) أكبر من المتاح ({max_avail}).")
-    accs = await db_fetchall("SELECT id, phone, session_file, price FROM accounts WHERE country=? AND status='available' LIMIT ?", (country, count))
+    accs = await db_fetchall("SELECT id, phone, session_file, price FROM accounts WHERE country=$1 AND status='available' LIMIT $2", (country, count))
     actual_count = len(accs)
     if actual_count < count:
         await state.clear()
         return await msg.reply(f"❌ المتاح حالياً {actual_count} فقط. حاول مرة أخرى.", reply_markup=main_kb(uid))
-    total_price = sum(a[3] for a in accs)
-    bal_row = await db_fetchone("SELECT balance FROM users WHERE user_id=?", (uid,))
+    total_price = sum(a['price'] for a in accs)
+    bal_row = await db_fetchone("SELECT balance FROM users WHERE user_id=$1", (uid,))
     bal = bal_row[0] if bal_row else 0
     if bal < total_price:
         await state.clear()
         return await msg.reply(f"❌ رصيد غير كافٍ.\nالمطلوب: {total_price:.2f}$\nرصيدك: {bal:.2f}$", reply_markup=main_kb(uid))
     await state.clear()
-    await db_execute("UPDATE users SET balance = balance - ? WHERE user_id=?", (total_price, uid))
-    ids = [a[0] for a in accs]
-    placeholders = ','.join('?' * len(ids))
-    await db_execute(f"UPDATE accounts SET status='processing' WHERE id IN ({placeholders})", ids)
+    await db_execute("UPDATE users SET balance = balance - $1 WHERE user_id=$2", (total_price, uid))
+    ids = [a['id'] for a in accs]
+    
+    conn = await asyncpg.connect(DATABASE_URL)
+    try:
+        await conn.execute("UPDATE accounts SET status='processing' WHERE id = ANY($1::int[])", ids)
+    finally:
+        await conn.close()
+
     processing_msg = await msg.reply("⏳ جاري فحص الجلسات وتجهيز الملف... يرجى الانتظار.")
     asyncio.create_task(prepare_and_send_sessions(msg, uid, accs, country, processing_msg))
 
@@ -1329,11 +1349,11 @@ async def prepare_and_send_sessions(msg: Message, uid, accs, country, processing
     actual_paid = 0.0
 
     for acc in accs:
-        aid, phone, sess_file, price = acc
+        aid, phone, sess_file, price = acc['id'], acc['phone'], acc['session_file'], acc['price']
         path = os.path.join(SESSIONS_DIR, sess_file)
         if not os.path.exists(path):
-            await db_execute("UPDATE users SET balance = balance + ? WHERE user_id=?", (price, uid))
-            await db_execute("UPDATE accounts SET status='corrupted' WHERE id=?", (aid,))
+            await db_execute("UPDATE users SET balance = balance + $1 WHERE user_id=$2", (price, uid))
+            await db_execute("UPDATE accounts SET status='corrupted' WHERE id=$1", (aid,))
             continue
         is_valid = False
         client = TelegramClient(path, API_ID, API_HASH)
@@ -1350,7 +1370,7 @@ async def prepare_and_send_sessions(msg: Message, uid, accs, country, processing
                 pass
 
         if is_valid:
-            fa_row = await db_fetchone("SELECT session_2fa_pass FROM accounts WHERE id=?", (aid,))
+            fa_row = await db_fetchone("SELECT session_2fa_pass FROM accounts WHERE id=$1", (aid,))
             fa = fa_row[0] if fa_row else None
             valid_sessions.append((aid, path, sess_file, phone, fa, price))
             actual_paid += price
@@ -1358,8 +1378,8 @@ async def prepare_and_send_sessions(msg: Message, uid, accs, country, processing
             passwords_content += pw_line
             caption_passwords.append(f"📞 +{phone.lstrip('+')} | 🔐 <code>{fa if fa else 'بدون'}</code>")
         else:
-            await db_execute("UPDATE users SET balance = balance + ? WHERE user_id=?", (price, uid))
-            await db_execute("UPDATE accounts SET status='corrupted' WHERE id=?", (aid,))
+            await db_execute("UPDATE users SET balance = balance + $1 WHERE user_id=$2", (price, uid))
+            await db_execute("UPDATE accounts SET status='corrupted' WHERE id=$1", (aid,))
 
     if not valid_sessions:
         await processing_msg.edit_text("❌ للأسف، جميع الجلسات المختارة كانت غير صالحة. تم إرجاع المبلغ بالكامل.")
@@ -1375,12 +1395,16 @@ async def prepare_and_send_sessions(msg: Message, uid, accs, country, processing
     timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
     zip_filename = f"Sessions_{country}_{timestamp}.zip"
 
-    for aid, _, _, phone, _, price in valid_sessions:
-        await db_execute("UPDATE accounts SET status='sold' WHERE id=?", (aid,))
-        await db_execute(
-            "INSERT INTO orders (user_id, phone, price, date) VALUES (?,?,?,?)",
-            (uid, phone, price, datetime.now().strftime("%Y/%m/%d %H:%M"))
-        )
+    conn = await asyncpg.connect(DATABASE_URL)
+    try:
+        for aid, _, _, phone, _, price in valid_sessions:
+            await conn.execute("UPDATE accounts SET status='sold' WHERE id=$1", aid)
+            await conn.execute(
+                "INSERT INTO orders (user_id, phone, price, date) VALUES ($1, $2, $3, $4)",
+                uid, phone, price, datetime.now().strftime("%Y/%m/%d %H:%M")
+            )
+    finally:
+        await conn.close()
 
     passwords_text = "\n".join(caption_passwords[:15])
     if len(caption_passwords) > 15:
@@ -1406,7 +1430,6 @@ async def prepare_and_send_sessions(msg: Message, uid, accs, country, processing
         await processing_msg.edit_text("❌ حدث خطأ أثناء إرسال الملف. تواصل مع الدعم.")
 
 async def main():
-    keep_alive()  # <--- Render تور بېتىنى قوزغىتىش ئۈچۈن قوشۇلدى
     await init_db()
     await dp.start_polling(bot)
 
