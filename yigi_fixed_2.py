@@ -21,6 +21,7 @@ from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.storage.memory import MemoryStorage
 from telethon import TelegramClient
 from telethon.errors import SessionPasswordNeededError
+from aiohttp import web
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -1429,8 +1430,19 @@ async def prepare_and_send_sessions(msg: Message, uid, accs, country, processing
         logger.error(f"Error sending ZIP: {e}")
         await processing_msg.edit_text("❌ حدث خطأ أثناء إرسال الملف. تواصل مع الدعم.")
 
+async def web_server():
+    async def handle(request):
+        return web.Response(text="Bot is running!")
+    app = web.Application()
+    app.router.add_get("/", handle)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", 10000)
+    await site.start()
+
 async def main():
     await init_db()
+    asyncio.create_task(web_server())
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
