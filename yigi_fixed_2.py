@@ -1437,12 +1437,16 @@ async def web_server():
     app.router.add_get("/", handle)
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", 10000)
+    port = int(os.environ.get("PORT", 10000))
+    site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
+    logger.info(f"Web server started on port {port}")
 
 async def main():
     await init_db()
-    asyncio.create_task(web_server())
+    # ئاۋۋال تور مۇلازىمېتىرىنى بىۋاسىتە قوزغىتىپ PORT نى ئاچىمىز
+    await web_server()
+    # ئاندىن تېلېگرامما بوتىنى باشلايمىز
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
