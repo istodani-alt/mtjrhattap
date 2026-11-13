@@ -61,7 +61,7 @@ NOTIFICATION_CHANNEL = "-1004358421968"
 TRANSFER_FEE_PERCENT = 0.05
 MANUAL_WALLET = "e340fa5d9713c087f3803ae2f6d9b9c5"
 
-# --- 1. Rise SMM API (SMS بۆلۈمى ئۈچۈن) ---
+# --- 1. Bot Rise API (SMS ۋە مۇلازىمەتلەر ئۈچۈن) ---
 RISE_API_URL = "https://vnvccv.shop/Ayma/api/v2"
 RISE_API_TOKEN = (
     "a4a725e2decd5670a8b33e3e59e4f13cbfae262c312b69d3d4f5d33e2fba1e7a"
@@ -301,7 +301,9 @@ def main_kb(uid):
               style='primary',
           ),
           InlineKeyboardButton(
-              text='📨 SMS', callback_data='sms_menu', style='primary'
+              text='📨 SMS & Services',
+              callback_data='sms_menu',
+              style='primary',
           ),
       ],
       [
@@ -2098,14 +2100,45 @@ async def show_terms(c: CallbackQuery):
   )
 
 
-# ====== 1. Rise SMM API (SMS بۆلۈمى) ======
+# ====== Bot Rise API Integration (SMS, Services & Store) ======
 @router.callback_query(F.data == 'sms_menu')
 async def sms_menu(c: CallbackQuery):
   kb = [
       [
           InlineKeyboardButton(
-              text='📨 طلب خدمة SMS جديدة',
-              callback_data='rise_sms_services',
+              text='📋 جميع الأقسام والخدمات (Catalog)',
+              callback_data='rise_catalog',
+              style='primary',
+          )
+      ],
+      [
+          InlineKeyboardButton(
+              text='🚀 خدمات الرشق والخدمات (Services)',
+              callback_data='rise_services',
+              style='success',
+          )
+      ],
+      [
+          InlineKeyboardButton(
+              text='📱 حسابات تلجرام (TG Accounts)',
+              callback_data='rise_tg_accounts',
+              style='success',
+          )
+      ],
+      [
+          InlineKeyboardButton(
+              text='⭐ نجوم / بريميوم / TON',
+              callback_data='rise_tg_store',
+              style='primary',
+          ),
+          InlineKeyboardButton(
+              text='🤖 Gemini', callback_data='rise_gemini', style='primary'
+          ),
+      ],
+      [
+          InlineKeyboardButton(
+              text='🛍 المنتجات الرقمية',
+              callback_data='rise_digital_products',
               style='success',
           )
       ],
@@ -2116,10 +2149,12 @@ async def sms_menu(c: CallbackQuery):
       ],
   ]
   text = (
-      '📨 <b>خدمة SMS (عبر Rise SMM)</b>\n\nالتوكن النشط والمربوط:\n'
-      '<code>a4a725e2decd5670a8b33e3e59e4f13cbfae262c312b69d3d4f5d33e2fba1e7a</code>\n\nرابط'
-      ' API:\n<code>https://vnvccv.shop/Ayma/api/v2</code>\n\nاختر العملية'
-      ' المطلوبة:'
+      '🌐 <b>نظام Bot Rise API المدمج:</b>\n\n'
+      'التوكن النشط والمربوط:\n'
+      '<code>a4a725e2decd5670a8b33e3e59e4f13cbfae262c312b69d3d4f5d33e2fba1e7a</code>\n\n'
+      'رابط API الأساسي:\n'
+      '<code>https://vnvccv.shop/Ayma/api/v2</code>\n\n'
+      'اختر القسم المطلوب للتصفح والطلب:'
   )
   await safe_edit_or_send(
       c.message,
@@ -2129,10 +2164,108 @@ async def sms_menu(c: CallbackQuery):
   )
 
 
-@router.callback_query(F.data == 'rise_sms_services')
-async def rise_sms_services(c: CallbackQuery):
+@router.callback_query(F.data == 'rise_catalog')
+async def rise_catalog_handler(c: CallbackQuery):
+  res = rise_smm_request('catalog')
+  text = f'📦 <b>جميع أقسام الخدمات (Catalog):</b>\n\n<pre>{res}</pre>'
+  kb = [
+      [
+          InlineKeyboardButton(
+              text='🔙 عودة', callback_data='sms_menu', style='primary'
+          )
+      ]
+  ]
+  await safe_edit_or_send(
+      c.message,
+      text=text,
+      parse_mode=ParseMode.HTML,
+      reply_markup=InlineKeyboardMarkup(inline_keyboard=kb),
+  )
+
+
+@router.callback_query(F.data == 'rise_services')
+async def rise_services_handler(c: CallbackQuery):
   res = rise_smm_request('services')
-  text = f'📋 <b>خدمات Rise SMM النشطة:</b>\n\n<pre>{res}</pre>'
+  text = f'🚀 <b>خدمات الرشق المتاحة (Services):</b>\n\n<pre>{res}</pre>'
+  kb = [
+      [
+          InlineKeyboardButton(
+              text='🔙 عودة', callback_data='sms_menu', style='primary'
+          )
+      ]
+  ]
+  await safe_edit_or_send(
+      c.message,
+      text=text,
+      parse_mode=ParseMode.HTML,
+      reply_markup=InlineKeyboardMarkup(inline_keyboard=kb),
+  )
+
+
+@router.callback_query(F.data == 'rise_tg_accounts')
+async def rise_tg_accounts_handler(c: CallbackQuery):
+  res = rise_smm_request('tg_accounts')
+  text = f'📱 <b>حسابات تلجرام المتاحة (TG Accounts):</b>\n\n<pre>{res}</pre>'
+  kb = [
+      [
+          InlineKeyboardButton(
+              text='🔙 عودة', callback_data='sms_menu', style='primary'
+          )
+      ]
+  ]
+  await safe_edit_or_send(
+      c.message,
+      text=text,
+      parse_mode=ParseMode.HTML,
+      reply_markup=InlineKeyboardMarkup(inline_keyboard=kb),
+  )
+
+
+@router.callback_query(F.data == 'rise_tg_store')
+async def rise_tg_store_handler(c: CallbackQuery):
+  res = rise_smm_request('telegram_store_quote')
+  text = (
+      '⭐ <b>نجوم، بريميوم و TON (Telegram Store):</b>\n\n<pre>'
+      f'{res}</pre>'
+  )
+  kb = [
+      [
+          InlineKeyboardButton(
+              text='🔙 عودة', callback_data='sms_menu', style='primary'
+          )
+      ]
+  ]
+  await safe_edit_or_send(
+      c.message,
+      text=text,
+      parse_mode=ParseMode.HTML,
+      reply_markup=InlineKeyboardMarkup(inline_keyboard=kb),
+  )
+
+
+@router.callback_query(F.data == 'rise_gemini')
+async def rise_gemini_handler(c: CallbackQuery):
+  res = rise_smm_request('gemini_purchase')
+  text = f'🤖 <b>Gemini خدمات:</b>\n\n<pre>{res}</pre>'
+  kb = [
+      [
+          InlineKeyboardButton(
+              text='🔙 عودة', callback_data='sms_menu', style='primary'
+          )
+      ]
+  ]
+  await safe_edit_or_send(
+      c.message,
+      text=text,
+      parse_mode=ParseMode.HTML,
+      reply_markup=InlineKeyboardMarkup(inline_keyboard=kb),
+  )
+
+
+@router.callback_query(F.data == 'rise_digital_products')
+async def rise_digital_products_handler(c: CallbackQuery):
+  res = rise_smm_request('digital_products')
+  text = f'🛍 <b>المنتجات الرقمية المتاحة:</b>\n\n<pre>{res}</pre>'
   kb = [
       [
           InlineKeyboardButton(
