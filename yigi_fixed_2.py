@@ -8,13 +8,14 @@ import zipfile
 import io
 import uuid
 import hashlib
+import requests
 from datetime import datetime
 from aiogram import Bot, Dispatcher, Router, F
 from aiogram.enums import ParseMode
 from aiogram.filters import CommandStart
 from aiogram.types import (
     Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton,
-    LabeledPrice, PreCheckoutQuery, BufferedInputFile, CopyTextButton
+    BufferedInputFile, CopyTextButton
 )
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
@@ -34,10 +35,44 @@ API_HASH = "b36f73444855dc87595d2757279b9409"
 DATABASE_URL = "postgresql://postgres:hattap571611@db.sqnhyxwszicqibznnmsj.supabase.co:5432/postgres"
 SESSIONS_DIR = "sessions"
 TEMP_DIR = "temp"
-NOTIFICATION_CHANNEL = "-1005247605135"
-STARS_RATE = 150
+NOTIFICATION_CHANNEL = "-1004358421968"
 TRANSFER_FEE_PERCENT = 0.05
 MANUAL_WALLET = "e340fa5d9713c087f3803ae2f6d9b9c5"
+
+# --- 1. Rise SMM API (SMS بۆلۈمى ئۈچۈن) ---
+RISE_API_URL = "https://vnvccv.shop/Ayma/api/v2"
+RISE_API_TOKEN = "a4a725e2decd5670a8b33e3e59e4f13cbfae262c312b69d3d4f5d33e2fba1e7a"
+
+def rise_smm_request(action, params=None):
+    if params is None:
+        params = {}
+    params['key'] = RISE_API_TOKEN
+    params['action'] = action
+    try:
+        res = requests.post(RISE_API_URL, data=params, timeout=15)
+        return res.json()
+    except Exception:
+        return {"status": False}
+
+# --- 2. Shark TG API ([شراء حسابات جاهز 2] ئۈچۈن) ---
+SHARK_API_KEY = "6z4mu0j3638xlf7awp9j"
+SHARK_BASE_URL = "https://sharktg.com/sub/api/?"
+
+def shark_get_number(country_code):
+    url = f"{SHARK_BASE_URL}apiKey={SHARK_API_KEY}&action=getNumber&country={country_code}"
+    try:
+        res = requests.get(url, timeout=15)
+        return res.json()
+    except Exception:
+        return {"status": False}
+
+def shark_get_code(hash_code):
+    url = f"{SHARK_BASE_URL}apiKey={SHARK_API_KEY}&action=getCode&hash_code={hash_code}"
+    try:
+        res = requests.get(url, timeout=15)
+        return res.json()
+    except Exception:
+        return {"status": False}
 # ==========================================
 
 for d in [SESSIONS_DIR, TEMP_DIR]:
@@ -73,13 +108,15 @@ class AdminUserStates(StatesGroup):
     search_uid = State()
     edit_balance = State()
 
-class AdminCountryStates(StatesGroup):
-    new_name = State()
-    new_price = State()
-    new_2fa = State()
+class SupportStates(StatesGroup):
+    waiting_for_message = State()
 
-class AdminSettingsStates(StatesGroup):
-    changing_stars_rate = State()
+class SharkStates(StatesGroup):
+    waiting_for_country = State()
+    waiting_for_hash = State()
+
+class RiseSmsStates(StatesGroup):
+    waiting_for_service = State()
 
 async def safe_edit_or_send(message: Message, text=None, reply_markup=None, parse_mode=None, photo=None, caption=None, document=None):
     try:
@@ -111,7 +148,6 @@ async def init_db():
         await conn.execute('''CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)''')
         await conn.execute('''CREATE TABLE IF NOT EXISTS user_transfers (id SERIAL PRIMARY KEY, sender_id BIGINT, receiver_id BIGINT, amount REAL, fee REAL, net_amount REAL, link TEXT UNIQUE, status TEXT DEFAULT 'pending')''')
         await conn.execute('''CREATE TABLE IF NOT EXISTS manual_deposits (id SERIAL PRIMARY KEY, user_id BIGINT, txid TEXT UNIQUE, amount REAL, status TEXT DEFAULT 'pending', date TEXT)''')
-        await conn.execute("INSERT INTO settings (key, value) VALUES ('stars_rate', $1) ON CONFLICT (key) DO NOTHING", str(STARS_RATE))
     finally:
         await conn.close()
 
@@ -151,13 +187,6 @@ async def db_fetchall(query, params=()):
     finally:
         await conn.close()
 
-async def get_setting(key, default=None):
-    res = await db_fetchone("SELECT value FROM settings WHERE key=$1", (key,))
-    return res[0] if res else default
-
-async def set_setting(key, value):
-    await db_execute("INSERT INTO settings (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", (key, str(value)))
-
 def mask_phone(phone: str) -> str:
     if not phone or len(phone) < 6:
         return phone
@@ -168,14 +197,20 @@ def main_kb(uid):
         [InlineKeyboardButton(text="🛒 شراء حساب", callback_data="buy_menu", style='success')],
         [
             InlineKeyboardButton(text="📦 شراء جلسات", callback_data="buy_sessions_zip", style='primary'),
-            InlineKeyboardButton(text="📨 SMS", callback_data="sms_soon", style='primary')
+            InlineKeyboardButton(text="📨 SMS", callback_data="sms_menu", style='primary')
         ],
-        [InlineKeyboardButton(text="💳 شحن رصيد", callback_data="charge_menu", style='primary')],
+        [
+            InlineKeyboardButton(text="💳 شحن رصيد", callback_data="charge_menu", style='primary'),
+            InlineKeyboardButton(text="🛍 شراء حسابات جاهز 2", callback_data="shark_buy_menu", style='success')
+        ],
         [
             InlineKeyboardButton(text="📢 قناة التفعيلات", url=f"https://t.me/{NOTIFICATION_CHANNEL.replace('@','')}", style='success'),
             InlineKeyboardButton(text="⚖️ شروط الاستخدام", callback_data="settings_menu", style='primary')
         ],
-        [InlineKeyboardButton(text="💸 تحويل رصيد", callback_data="transfer_menu", style='primary')]
+        [
+            InlineKeyboardButton(text="💸 تحويل رصيد", callback_data="transfer_menu", style='primary'),
+            InlineKeyboardButton(text="📞 تواصل معنا", callback_data="contact_us", style='primary')
+        ]
     ]
     if uid in ADMIN_IDS:
         kb.insert(0, [InlineKeyboardButton(text="👑 لوحة الإدارة", callback_data="admin_panel", style='danger')])
@@ -235,15 +270,127 @@ async def main_menu(c: CallbackQuery, state: FSMContext):
             f"🔻 للتحكم بالأزرار الخاصة بالبوت من الأسفل:   ")
     await safe_edit_or_send(c.message, text=text, parse_mode=ParseMode.HTML, reply_markup=main_kb(uid))
 
+# ====== Contact Us & Support Chat System ======
+@router.callback_query(F.data == "contact_us")
+async def contact_us_menu(c: CallbackQuery):
+    kb = [
+        [InlineKeyboardButton(text="📩 تواصل مباشرة (إرسال رسالة للإدارة)", callback_data="start_support_chat", style='success')],
+        [
+            InlineKeyboardButton(text="👤 الأول: @hattab7657", url="https://t.me/hattab7657"),
+            InlineKeyboardButton(text="📥 الثاني: @mdirbot67", url="https://t.me/mdirbot67")
+        ],
+        [InlineKeyboardButton(text="📥 الثالث: @hattab0033", url="https://t.me/hattab0033")],
+        [InlineKeyboardButton(text="🔙 عودة", callback_data="main_menu", style='primary')]
+    ]
+    text = (
+        "📞 <b>تواصل معنا عبر تلجرام:</b>\n\n"
+        "تواصل عبر تلجرام 👇👇\n\n"
+        "اول 📥 مدير مباشرة ⏺\n@hattab7657\n\n"
+        "الثاني 📥 (خادم)\n@mdirbot67\n\n"
+        "الثالث 📥 (خادم)\n@hattab0033"
+    )
+    await safe_edit_or_send(c.message, text=text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+
+@router.callback_query(F.data == "start_support_chat")
+async def start_support_chat(c: CallbackQuery, state: FSMContext):
+    await state.set_state(SupportStates.waiting_for_message)
+    text = (
+        "📩 <b>هل تواجهون أي مشاكل أو لديكم أي اقتراحات أو طلبات؟</b>\n\n"
+        "لا تترددوا في إرسالها إلينا، فنحن نرحب بآرائكم وملاحظاتكم ونسعى دائماً إلى تحسين خدماتنا وتلبية احتياجاتكم. ❤️\n\n"
+        "✍️ أرسل رسالتك الآن وسيقوم الفريق بالرد عليك:"
+    )
+    await safe_edit_or_send(c.message, text=text, parse_mode=ParseMode.HTML, reply_markup=back_kb("contact_us"))
+
+@router.message(SupportStates.waiting_for_message)
+async def process_user_support_message(msg: Message, state: FSMContext):
+    uid = msg.from_user.id
+    uname = msg.from_user.username or "NoUsername"
+    text = msg.text
+
+    await state.clear()
+    await msg.reply("✅ تم إرسال رسالتك إلى الإدارة بنجاح. سيتم الرد عليك قريباً!", reply_markup=main_kb(uid))
+
+    admin_kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💬 الرد على المستخدم", callback_data=f"reply_user:{uid}", style='success')]
+    ])
+    for admin_id in ADMIN_IDS:
+        try:
+            await bot.send_message(
+                admin_id,
+                f"📩 <b>رسالة دعم جديدة من مستخدم:</b>\n\n"
+                f"👤 المستخدم: <code>{uid}</code> (@{uname})\n"
+                f"💬 النص:\n{text}",
+                parse_mode=ParseMode.HTML,
+                reply_markup=admin_kb
+            )
+        except Exception:
+            pass
+
+class AdminReplyStates(StatesGroup):
+    waiting_for_reply_text = State()
+
+@router.callback_query(F.data.startswith("reply_user:"))
+async def admin_start_reply(c: CallbackQuery, state: FSMContext):
+    if c.from_user.id not in ADMIN_IDS:
+        return
+    target_uid = int(c.data.split(":")[1])
+    await state.update_data(target_uid=target_uid)
+    await state.set_state(AdminReplyStates.waiting_for_reply_text)
+    await c.message.answer("✍️ أرسل نص الرد ليتم إرساله إلى المستخدم:")
+    await c.answer()
+
+@router.message(AdminReplyStates.waiting_for_reply_text)
+async def admin_send_reply(msg: Message, state: FSMContext):
+    if msg.from_user.id not in ADMIN_IDS:
+        return
+    data = await state.get_data()
+    target_uid = data['target_uid']
+    reply_text = msg.text
+    await state.clear()
+
+    try:
+        await bot.send_message(
+            target_uid,
+            f"💬 <b>رد من الإدارة:</b>\n\n{reply_text}",
+            parse_mode=ParseMode.HTML
+        )
+        await msg.reply("✅ تم إرسال الرد للمستخدم بنجاح.")
+    except Exception as e:
+        await msg.reply(f"❌ تعذر إرسال الرد للمستخدم: {e}")
+
+# ==========================================
+
 @router.callback_query(F.data == "charge_menu")
 async def charge_menu(c: CallbackQuery):
-    stars_rate = await get_setting("stars_rate", STARS_RATE)
     kb = [
-        [InlineKeyboardButton(text="💎 شحن عبر شامكەش (يدوي)", callback_data="manual_deposit_start", style='success')],
-        [InlineKeyboardButton(text=f"⭐ شحن بالنجوم ({stars_rate} نجمة = 1$)", callback_data="stars_charge_select", style='primary')],
+        [InlineKeyboardButton(text="🟢 شحن عبر شامكەش (يدوي)", callback_data="manual_deposit_start", style='success')],
+        [InlineKeyboardButton(text="💎 شحن عبر الرقمية TON", callback_data="ton_charge_info", style='primary')],
         [InlineKeyboardButton(text="🔙 عودة", callback_data="main_menu", style='primary')]
     ]
     await safe_edit_or_send(c.message, text="💳 اختر طريقة الشحن:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+
+@router.callback_query(F.data == "ton_charge_info")
+async def ton_charge_info(c: CallbackQuery):
+    ton_text = (
+        "💎 <b>شحن عبر العملات الرقمية TON</b>\n\n"
+        "تأكد حسابنا قبل أن تدفع.\n\n"
+        "إيداع عملات رقمية 📥\n\n"
+        "💱 <b>العملة:</b> USDT\n"
+        "🪩 <b>الشبكة:</b> USDT-The Open Network (TON)\n\n"
+        "🔗 <b>عنوان الإيداع:</b>\n"
+        "<code>UQAYw00KDTVyJYu4pKyEJUxTwczX7cQ5xDs8ipnCpOOOzi3g</code>\n\n"
+        "⚠️ <b>الحد الأدنى للإيداع:</b> 0.01 USDT\n"
+        "💡 تأكد من إرسال مبلغ أكبر من 0.01 USDT\n"
+        "⏳ <b>وقت العملة:</b> 60:00 دقيقة\n\n"
+        "⚠️ تأكد من اختيار الشبكة الصحيحة لتجنب ضياع الأموال.\n"
+        "⚠️ المعاملات من محافظ خارجية قد تستغرق 5-15 دقيقة للوصول."
+    )
+    copy_btn = InlineKeyboardButton(text="📋 نسخ العنوان", copy_text=CopyTextButton(text="UQAYw00KDTVyJYu4pKyEJUxTwczX7cQ5xDs8ipnCpOOOzi3g"), style='primary')
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [copy_btn],
+        [InlineKeyboardButton(text="🔙 عودة", callback_data="charge_menu", style='primary')]
+    ])
+    await safe_edit_or_send(c.message, text=ton_text, parse_mode=ParseMode.HTML, reply_markup=kb)
 
 # ====== Manual Deposit (شامكەش) Logic ======
 @router.callback_query(F.data == "manual_deposit_start")
@@ -365,60 +512,6 @@ async def admin_deposit_decision(c: CallbackQuery):
             pass
     await c.answer()
 
-# ==========================================
-
-@router.callback_query(F.data == "stars_charge_select")
-async def stars_charge_options(c: CallbackQuery):
-    stars_rate = float(await get_setting("stars_rate", STARS_RATE))
-    options = [
-        ("0.1$", 0.1), ("0.5$", 0.5), ("1$", 1.0), ("2$", 2.0),
-        ("5$", 5.0), ("10$", 10.0), ("20$", 20.0)
-    ]
-    kb = []
-    row = []
-    for label, amount in options:
-        star_cost = max(1, int(amount * stars_rate))
-        btn = InlineKeyboardButton(text=f"{label} ({star_cost} ⭐)", callback_data=f"stars_invoice:{amount}", style='primary')
-        row.append(btn)
-        if len(row) == 2:
-            kb.append(row)
-            row = []
-    if row:
-        kb.append(row)
-    kb.append([InlineKeyboardButton(text="🔙 عودة", callback_data="charge_menu", style='primary')])
-    await safe_edit_or_send(c.message, text="⭐ اختر مبلغ الشحن بالنجوم:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
-
-@router.callback_query(F.data.startswith("stars_invoice:"))
-async def send_stars_invoice(c: CallbackQuery):
-    amount_str = c.data.split(":")[1]
-    usd_val = float(amount_str)
-    stars_rate = float(await get_setting("stars_rate", STARS_RATE))
-    star_amount = max(1, int(usd_val * stars_rate))
-    await bot.send_invoice(
-        chat_id=c.from_user.id,
-        title=f"شحن {usd_val}$",
-        description=f"شحن رصيد بقيمة {usd_val}$ عبر نجوم تيليجرام",
-        payload=f"stars_{c.from_user.id}_{usd_val}",
-        provider_token="",
-        currency="XTR",
-        prices=[LabeledPrice(label="Stars", amount=star_amount)]
-    )
-    await c.answer()
-
-@router.pre_checkout_query()
-async def pre_checkout(q: PreCheckoutQuery):
-    await q.answer(ok=True)
-
-@router.message(F.successful_payment)
-async def payment_success(msg: Message):
-    p = msg.successful_payment
-    parts = p.invoice_payload.split("_")
-    if parts[0] == "stars":
-        uid, usd_val = int(parts[1]), float(parts[2])
-        await db_execute("INSERT INTO users (user_id, username) VALUES ($1, $2) ON CONFLICT (user_id) DO NOTHING", (uid, msg.from_user.username or "User"))
-        await db_execute("UPDATE users SET balance = balance + $1 WHERE user_id=$2", (usd_val, uid))
-        await msg.answer(f"✅ تم شحن رصيدك بنجاح!\nالمبلغ: {usd_val}$")
-
 @router.callback_query(F.data == "transfer_menu")
 async def transfer_menu(c: CallbackQuery):
     kb = [
@@ -528,34 +621,11 @@ async def admin_panel(c: CallbackQuery):
     kb = [
         [InlineKeyboardButton(text="📂 رفع ZIP جماعي", callback_data="admin_bulk_zip", style='success'),
          InlineKeyboardButton(text="👥 إدارة المستخدمين", callback_data="admin_users_manage", style='primary')],
-        [InlineKeyboardButton(text="🌍 إدارة الأقسام والأسعار", callback_data="admin_countries_manage", style='primary'),
-         InlineKeyboardButton(text="⭐ إعدادات النجوم", callback_data="admin_settings_stars", style='primary')],
+        [InlineKeyboardButton(text="🌍 إدارة الأقسام والأسعار", callback_data="admin_countries_manage", style='primary')],
         [InlineKeyboardButton(text="🔙 خروج", callback_data="main_menu", style='primary')]
     ]
     text = f"👑 لوحة التحكم\n👥 المستخدمين: {users_count}\n📦 الحسابات المتاحة: {accs_count}"
     await safe_edit_or_send(c.message, text=text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
-
-@router.callback_query(F.data == "admin_settings_stars")
-async def settings_stars(c: CallbackQuery, state: FSMContext):
-    if c.from_user.id not in ADMIN_IDS:
-        return
-    current_rate = await get_setting("stars_rate", STARS_RATE)
-    await state.set_state(AdminSettingsStates.changing_stars_rate)
-    await safe_edit_or_send(c.message, text=f"⭐ سعر النجوم الحالي: {current_rate} نجمة = 1$\nأرسل الرقم الجديد:", reply_markup=back_kb("admin_panel"))
-
-@router.message(AdminSettingsStates.changing_stars_rate)
-async def process_stars_rate_change(msg: Message, state: FSMContext):
-    if msg.from_user.id not in ADMIN_IDS:
-        return
-    try:
-        new_rate = int(msg.text.strip())
-        if new_rate <= 0:
-            raise ValueError
-        await set_setting("stars_rate", new_rate)
-        await msg.reply(f"✅ تم تحديث سعر النجوم ليصبح: {new_rate} نجمة = 1$", reply_markup=back_kb("admin_panel"))
-        await state.clear()
-    except ValueError:
-        await msg.reply("❌ يرجى إدخال رقم صحيح أكبر من صفر.")
 
 @router.callback_query(F.data == "admin_bulk_zip")
 async def start_bulk_zip(c: CallbackQuery, state: FSMContext):
@@ -830,107 +900,6 @@ async def admin_countries_list(c: CallbackQuery):
     kb.append([InlineKeyboardButton(text="🔙 عودة", callback_data="admin_panel", style='primary')])
     await safe_edit_or_send(c.message, text="🌍 اختر القسم للتعديل عليه:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
 
-@router.callback_query(F.data.startswith("edit_country:"))
-async def edit_country_menu(c: CallbackQuery, state: FSMContext):
-    if c.from_user.id not in ADMIN_IDS:
-        return
-    country = c.data.split(":", 1)[1]
-    await state.update_data(target_country=country)
-    kb = [
-        [InlineKeyboardButton(text="✏️ تغيير اسم القسم", callback_data=f"rename_country:{country}", style='primary'),
-         InlineKeyboardButton(text="💰 تغيير سعر البيع (للكل)", callback_data=f"price_country:{country}", style='success')],
-        [InlineKeyboardButton(text="🔐 تعيين/إزالة 2FA (للكل)", callback_data=f"set_2fa_country:{country}", style='danger'),
-         InlineKeyboardButton(text="🗑️ حذف القسم", callback_data=f"delete_country:{country}", style='danger')],
-        [InlineKeyboardButton(text="🔙 عودة", callback_data="admin_countries_manage", style='primary')]
-    ]
-    await safe_edit_or_send(c.message, text=f"⚙️ إدارة قسم: <b>{country}</b>", parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
-
-@router.callback_query(F.data.startswith("rename_country:"))
-async def start_rename(c: CallbackQuery, state: FSMContext):
-    if c.from_user.id not in ADMIN_IDS:
-        return
-    await state.update_data(old_country=c.data.split(":", 1)[1])
-    await state.set_state(AdminCountryStates.new_name)
-    await c.message.answer("✏️ أدخل الاسم الجديد للقسم:")
-    await c.answer()
-
-@router.message(AdminCountryStates.new_name)
-async def process_rename(msg: Message, state: FSMContext):
-    if msg.from_user.id not in ADMIN_IDS:
-        return
-    data = await state.get_data()
-    old = data['old_country']
-    new = msg.text.strip()
-    await db_execute("UPDATE accounts SET country=$1 WHERE country=$2", (new, old))
-    await db_execute("UPDATE categories SET country=$1 WHERE country=$2", (new, old))
-    await msg.reply(f"✅ تم تغيير اسم القسم إلى '{new}'", reply_markup=back_kb("admin_countries_manage"))
-    await state.clear()
-
-@router.callback_query(F.data.startswith("price_country:"))
-async def start_price(c: CallbackQuery, state: FSMContext):
-    if c.from_user.id not in ADMIN_IDS:
-        return
-    country = c.data.split(":", 1)[1]
-    await state.update_data(target_country=country)
-    await state.set_state(AdminCountryStates.new_price)
-    await c.message.answer(f"💰 أدخل السعر الجديد لقسم '{country}':")
-    await c.answer()
-
-@router.message(AdminCountryStates.new_price)
-async def process_price(msg: Message, state: FSMContext):
-    if msg.from_user.id not in ADMIN_IDS:
-        return
-    try:
-        price = float(msg.text.strip())
-        if price <= 0:
-            raise ValueError
-        data = await state.get_data()
-        await db_execute("UPDATE accounts SET price=$1 WHERE country=$2", (price, data['target_country']))
-        await msg.reply(f"✅ تم تحديث السعر إلى {price}$", reply_markup=back_kb("admin_countries_manage"))
-        await state.clear()
-    except ValueError:
-        await msg.reply("❌ أدخل رقماً صحيحاً.")
-
-@router.callback_query(F.data.startswith("set_2fa_country:"))
-async def start_set_2fa(c: CallbackQuery, state: FSMContext):
-    if c.from_user.id not in ADMIN_IDS:
-        return
-    country = c.data.split(":", 1)[1]
-    await state.update_data(target_country=country)
-    await state.set_state(AdminCountryStates.new_2fa)
-    await c.message.answer(f"🔐 أدخل كلمة المرور الجديدة (2FA) لقسم '{country}'\n(اكتب 'none' لإزالة الحماية):")
-    await c.answer()
-
-@router.message(AdminCountryStates.new_2fa)
-async def process_set_2fa(msg: Message, state: FSMContext):
-    if msg.from_user.id not in ADMIN_IDS:
-        return
-    input_val = msg.text.strip()
-    new_2fa = None if input_val.lower() == 'none' else input_val
-    data = await state.get_data()
-    await db_execute("UPDATE accounts SET session_2fa_pass=$1 WHERE country=$2", (new_2fa, data['target_country']))
-    display_val = new_2fa if new_2fa else "لا يوجد (None)"
-    await msg.reply(f"✅ تم تحديث كلمة المرور في قسم '{data['target_country']}'\n🔑 الكلمة الجديدة: {display_val}", reply_markup=back_kb("admin_countries_manage"))
-    await state.clear()
-
-@router.callback_query(F.data.startswith("delete_country:"))
-async def delete_country(c: CallbackQuery):
-    if c.from_user.id not in ADMIN_IDS:
-        return
-    country = c.data.split(":", 1)[1]
-    accs = await db_fetchall("SELECT session_file FROM accounts WHERE country=$1", (country,))
-    for s in accs:
-        p = os.path.join(SESSIONS_DIR, s['session_file'])
-        if os.path.exists(p):
-            try:
-                os.remove(p)
-            except Exception:
-                pass
-    await db_execute("DELETE FROM accounts WHERE country=$1", (country,))
-    await db_execute("DELETE FROM categories WHERE country=$1", (country,))
-    await c.answer(f"✅ تم حذف قسم {country} وجميع حساباته", show_alert=True)
-    await admin_countries_list(c)
-
 @router.callback_query(F.data == "buy_menu")
 async def buy_menu(c: CallbackQuery):
     await show_countries_page(c.message, page=0)
@@ -942,7 +911,7 @@ async def show_countries_page(message: Message, page=0):
     all_countries_names = sorted(list(set([r['country'] for r in cats_rows] + [r['country'] for r in accs_rows])))
     if not all_countries_names:
         kb = [
-            [InlineKeyboardButton(text="لا توجد أقسام حالياً", callback_data="noop")],
+            [InlineKeyboardButton(text="لا توجد أقسام متاحة حالياً", callback_data="noop")],
             [InlineKeyboardButton(text="🔙 عودة", callback_data="main_menu", style='primary')]
         ]
         await safe_edit_or_send(message, text="🛒 لا توجد دول متاحة حالياً.", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
@@ -1249,8 +1218,8 @@ async def refund(aid, uid):
 async def settings_menu(c: CallbackQuery):
     kb = [
         [InlineKeyboardButton(text="⚖️ شروط الاستخدام", callback_data="terms_of_use", style='primary'),
-         InlineKeyboardButton(text="🛠️ الدعم الفني", url="https://t.me/support_user", style='success')],
-        [InlineKeyboardButton(text="👨‍💻 مطور البوت", url="https://t.me/TeleMarket_admin1", style='primary')],
+         InlineKeyboardButton(text="🛠️ الدعم الفني", url="https://t.me/hattab7657", style='success')],
+        [InlineKeyboardButton(text="👨‍💻 مطور البوت", url="https://t.me/hattab7657", style='primary')],
         [InlineKeyboardButton(text="🔙 عودة", callback_data="main_menu", style='primary')]
     ]
     await safe_edit_or_send(c.message, text="⚙️ الإعدادات والمعلومات\n\nاختر الخيار المطلوب: ", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
@@ -1264,9 +1233,69 @@ async def show_terms(c: CallbackQuery):
     kb = [[InlineKeyboardButton(text="🔙 عودة", callback_data="settings_menu", style='primary')]]
     await safe_edit_or_send(c.message, text=terms_text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
 
-@router.callback_query(F.data == "sms_soon")
-async def sms_soon(c: CallbackQuery):
-    await c.answer("خدمة SMS قريباً... Stay Tuned!", show_alert=True)
+# ====== 1. Rise SMM API (SMS بۆلۈمى) ======
+@router.callback_query(F.data == "sms_menu")
+async def sms_menu(c: CallbackQuery):
+    kb = [
+        [InlineKeyboardButton(text="📨 طلب خدمة SMS جديدة", callback_data="rise_sms_services", style='success')],
+        [InlineKeyboardButton(text="🔙 عودة", callback_data="main_menu", style='primary')]
+    ]
+    text = (
+        "📨 <b>خدمة SMS (عبر Rise SMM)</b>\n\n"
+        "التوكن النشط والمربوط:\n"
+        "<code>a4a725e2decd5670a8b33e3e59e4f13cbfae262c312b69d3d4f5d33e2fba1e7a</code>\n\n"
+        "رابط API:\n"
+        "<code>https://vnvccv.shop/Ayma/api/v2</code>\n\n"
+        "اختر العملية المطلوبة:"
+    )
+    await safe_edit_or_send(c.message, text=text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+
+@router.callback_query(F.data == "rise_sms_services")
+async def rise_sms_services(c: CallbackQuery):
+    # Rise SMM API dan xizmatلارنى سوراش ياكى كۆرسىتىش
+    res = rise_smm_request("services")
+    text = f"📋 <b>خدمات Rise SMM النشطة:</b>\n\n<pre>{res}</pre>"
+    kb = [[InlineKeyboardButton(text="🔙 عودة", callback_data="sms_menu", style='primary')]]
+    await safe_edit_or_send(c.message, text=text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+
+
+# ====== 2. Shark TG API ([شراء حسابات جاهز 2]) ======
+@router.callback_query(F.data == "shark_buy_menu")
+async def shark_buy_menu(c: CallbackQuery):
+    kb = [
+        [InlineKeyboardButton(text="📱 طلب نومۇر (Get Number)", callback_data="shark_get_number_prompt", style='success')],
+        [InlineKeyboardButton(text="🔑 جلب الكود (Get Code)", callback_data="shark_get_code_prompt", style='primary')],
+        [InlineKeyboardButton(text="🔙 عودة", callback_data="main_menu", style='primary')]
+    ]
+    await safe_edit_or_send(c.message, text="🛍 <b>شراء حسابات جاهز 2 (Shark TG)</b>\n\nاختر العملية المطلوبة:", parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+
+@router.callback_query(F.data == "shark_get_number_prompt")
+async def shark_get_number_prompt(c: CallbackQuery, state: FSMContext):
+    await state.set_state(SharkStates.waiting_for_country)
+    await safe_edit_or_send(c.message, text="🌍 أدخل رمز الدولة المطلوبة لطلب الرقم عبر Shark TG (مثال: ru, us, kaz):", reply_markup=back_kb("shark_buy_menu"))
+
+@router.message(SharkStates.waiting_for_country)
+async def shark_process_get_number(msg: Message, state: FSMContext):
+    country_code = msg.text.strip()
+    await state.clear()
+    
+    res = shark_get_number(country_code)
+    await msg.reply(f"📥 <b>نتيجة طلب الرقم (Shark TG):</b>\n<pre>{res}</pre>", parse_mode=ParseMode.HTML, reply_markup=main_kb(msg.from_user.id))
+
+@router.callback_query(F.data == "shark_get_code_prompt")
+async def shark_get_code_prompt(c: CallbackQuery, state: FSMContext):
+    await state.set_state(SharkStates.waiting_for_hash)
+    await safe_edit_or_send(c.message, text="🔑 أدخل الـ (hash_code) الخاص بالرقم لجلب كود التفعيل:", reply_markup=back_kb("shark_buy_menu"))
+
+@router.message(SharkStates.waiting_for_hash)
+async def shark_process_get_code(msg: Message, state: FSMContext):
+    hash_code = msg.text.strip()
+    await state.clear()
+    
+    res = shark_get_code(hash_code)
+    await msg.reply(f"📥 <b>نتيجة جلب الكود (Shark TG):</b>\n<pre>{res}</pre>", parse_mode=ParseMode.HTML, reply_markup=main_kb(msg.from_user.id))
+
+# ==========================================
 
 @router.callback_query(F.data == "buy_sessions_zip")
 async def buy_sessions_zip_start(c: CallbackQuery, state: FSMContext):
@@ -1444,9 +1473,7 @@ async def web_server():
 
 async def main():
     await init_db()
-    # ئاۋۋال تور مۇلازىمېتىرىنى بىۋاسىتە قوزغىتىپ PORT نى ئاچىمىز
     await web_server()
-    # ئاندىن تېلېگرامما بوتىنى باشلايمىز
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
